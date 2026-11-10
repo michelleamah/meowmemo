@@ -1,0 +1,13 @@
+{
+  "model_version": "meowmemo-20261023-1000",
+  "contexts": [
+    "food",
+    "brushing",
+    "isolation"
+  ],
+  "context_abstain_below": 0.5,
+  "detector": {
+    "likely": 0.6,
+    "not_detected_below": 0.3
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "tau": 1.0,
+  "k0": 6,
+  "w_max": 0.6,
+  "by_labels": {
+    "0": {
+      "general_accuracy": 0.5227272727272727,
+      "personal_accuracy": 0.5227272727272727,
+      "general_macro_f1": 0.4509017848799178,
+      "personal_macro_f1": 0.4509017848799178,
+      "share_with_personal_model": 0.0
+    },
+    "3": {
+      "general_accuracy": 0.5227272727272727,
+      "personal_accuracy": 0.5845454545454546,
+      "general_macro_f1": 0.4509017848799178,
+      "personal_macro_f1": 0.5089322705781046,
+      "share_with_personal_model": 0.6690909090909091
+    },
+    "5": {
+      "general_accuracy": 0.5227272727272727,
+      "personal_accuracy": 0.6227272727272727,
+      "general_macro_f1": 0.4509017848799178,
+      "personal_macro_f1": 0.5513700084335303,
+      "share_with_personal_model": 0.7959090909090909
+    },
+    "10": {
+      "general_accuracy": 0.5227272727272727,
+      "personal_accuracy": 0.6645454545454546,
+      "general_macro_f1": 0.4509017848799178,
+      "personal_macro_f1": 0.5874337246738884,
+      "share_with_personal_model": 0.8663636363636363
+    },
+    "15": {
+      "general_accuracy": 0.5227272727272727,
+      "personal_accuracy": 0.6759090909090909,
+      "general_macro_f1": 0.4509017848799178,
+      "personal_macro_f1": 0.5999732892201982,
+      "share_with_personal_model": 0.8868181818181818
+    }
+  },
+  "method": "leave-one-cat-out general model + per-cat nearest-centroid model from m labelled clips of the same cat, 5 random repeats"
+}

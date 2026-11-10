@@ -1,0 +1,114 @@
+{
+  "model_version": "meowmemo-20261023-1000",
+  "context": {
+    "model": "forest",
+    "n_clips": 440,
+    "n_cats": 21,
+    "clips_per_context": {
+      "food": 92,
+      "brushing": 127,
+      "isolation": 221
+    },
+    "macro_f1_unseen_cats": 0.42744173140954494,
+    "accuracy_unseen_cats": 0.4772727272727273,
+    "macro_f1_majority_baseline": 0.22289460413514875,
+    "macro_f1_chance_baseline": 0.3346914506592145,
+    "macro_f1_random_clip_split_LEAKY": 0.6561744089552765,
+    "per_cat_accuracy": {
+      "ANI01": 0.7,
+      "BAC01": 0.44,
+      "BLE01": 0.375,
+      "BRA01": 0.631578947368421,
+      "BRI01": 0.4,
+      "CAN01": 0.24074074074074073,
+      "CLE01": 0.9,
+      "DAK01": 0.75,
+      "IND01": 0.3333333333333333,
+      "JJX01": 0.42857142857142855,
+      "LEO01": 0.6,
+      "MAG01": 0.18518518518518517,
+      "MAT01": 0.6153846153846154,
+      "MEG01": 0.5,
+      "MIN01": 0.5,
+      "NIG01": 0.2,
+      "NUL01": 0.7857142857142857,
+      "REG01": 0.4,
+      "SPI01": 0.3333333333333333,
+      "TIG01": 0.4,
+      "WHO01": 0.5641025641025641
+    },
+    "confusion_matrix": [
+      [
+        23,
+        35,
+        34
+      ],
+      [
+        31,
+        57,
+        39
+      ],
+      [
+        38,
+        53,
+        130
+      ]
+    ],
+    "abstain_threshold": 0.5,
+    "selective": {
+      "0.4": {
+        "coverage": 0.825,
+        "accuracy_when_answering": 0.5041322314049587
+      },
+      "0.5": {
+        "coverage": 0.32727272727272727,
+        "accuracy_when_answering": 0.625
+      },
+      "0.6": {
+        "coverage": 0.07272727272727272,
+        "accuracy_when_answering": 0.59375
+      },
+      "0.7": {
+        "coverage": 0.0,
+        "accuracy_when_answering": null
+      }
+    },
+    "evaluation": "leave-one-cat-out (21 folds)"
+  },
+  "detector": {
+    "model": "gradient_boosting",
+    "n_positive": 480,
+    "n_negative": 1960,
+    "f1_at_likely": 0.8818380743982495,
+    "precision_at_likely": 0.9285714285714286,
+    "recall_at_likely": 0.8395833333333333,
+    "recall_catmeows_at_likely": 0.8613636363636363,
+    "recall_esc50_cats_at_likely": 0.6,
+    "esc50_cats_at_least_uncertain": 0.675,
+    "false_likely_rate": {
+      "dog": 0.0,
+      "people": 0.045,
+      "any_non_cat": 0.015816326530612244
+    },
+    "decision_share": {
+      "likely": 0.1778688524590164,
+      "uncertain": 0.01557377049180328,
+      "not_detected": 0.8065573770491803
+    },
+    "thresholds": {
+      "likely": 0.6,
+      "not_detected_below": 0.3
+    },
+    "confusion_matrix_at_likely": [
+      [
+        1929,
+        31
+      ],
+      [
+        77,
+        403
+      ]
+    ],
+    "evaluation": "5-fold grouped (cats and ESC-50 folds held out); sound events, clip = most cat-like event"
+  }
+}

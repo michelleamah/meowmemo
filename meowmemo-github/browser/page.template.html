@@ -1,0 +1,989 @@
+<title>MeowMemo</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&display=swap">
+<style>/*STYLE_CSS*/</style>
+
+<main id="app" aria-live="polite"></main>
+<nav class="tabs" aria-label="Main">
+  <ul>
+    <li><a href="#analyse" data-tab="analyse"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M3 12h2M7 8v8M11 5v14M15 8v8M19 10.5v3"/></svg>Analyse</a></li>
+    <li><a href="#journal" data-tab="journal"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"/><path d="M4 20.5A2.5 2.5 0 0 0 6.5 23H20v-5"/></svg>Journal</a></li>
+    <li><a href="#cats" data-tab="cats"><svg viewBox="0 0 64 64" aria-hidden="true" fill="currentColor"><ellipse cx="32" cy="44" rx="13" ry="11"/><circle cx="15" cy="30" r="6"/><circle cx="25" cy="19" r="6"/><circle cx="39" cy="19" r="6"/><circle cx="49" cy="30" r="6"/></svg>Cats</a></li>
+  </ul>
+</nav>
+<div id="modal-root"></div>
+
+<script>/*FEATURES_JS*/</script>
+<script>/*MODEL_JS*/</script>
+<script>/*ILLUS_JS*/</script>
+<script id="model-data" type="application/json">/*MODEL_JSON*/</script>
+<script id="metrics-data" type="application/json">/*METRICS_JSON*/</script>
+<script id="samples-data" type="application/json">/*SAMPLES_JSON*/</script>
+<script>
+"use strict";
+const MODEL = JSON.parse(document.getElementById("model-data").textContent);
+const METRICS = JSON.parse(document.getElementById("metrics-data").textContent);
+const SAMPLES = JSON.parse(document.getElementById("samples-data").textContent);
+const F = window.MeowFeatures, M = window.MeowModel, ART = window.MeowArt;
+const MIN_S = 2, MAX_S = 15;
+
+const LABELS = [
+  { id: "food", text: "Wants food" },
+  { id: "brushing", text: "Being brushed or handled" },
+  { id: "isolation", text: "Alone or somewhere new" },
+  { id: "other", text: "Something else" },
+  { id: "unknown", text: "Not sure" },
+];
+const labelText = (id) => (LABELS.find((l) => l.id === id) || {}).text || id;
+const CONTEXT_TEXT = {
+  food: "waiting for food",
+  brushing: "being brushed",
+  isolation: "alone in an unfamiliar room",
+};
+const DETECTION_HEAD = {
+  likely: "This sounds like a cat",
+  uncertain: "Possibly a cat. Hard to tell",
+  not_detected: "No cat sound detected",
+};
+
+// ---------------- storage (this browser only) ----------------
+const store = (() => {
+  let db = null, memory = { cats: [], recordings: [], consent: false }, persistent = false;
+  async function open() {
+    try {
+      db = await new Promise((res, rej) => {
+        const r = indexedDB.open("meowmemo-web", 1);
+        r.onupgradeneeded = () => {
+          r.result.createObjectStore("cats", { keyPath: "id" });
+          r.result.createObjectStore("recordings", { keyPath: "id" });
+          r.result.createObjectStore("meta", { keyPath: "k" });
+        };
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      });
+      persistent = true;
+    } catch { db = null; persistent = false; }
+  }
+  function req(storeName, mode, fn) {
+    return new Promise((res, rej) => {
+      const t = db.transaction(storeName, mode);
+      const r = fn(t.objectStore(storeName));
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+  }
+  async function safe(fn, fallback) {
+    if (!db) return fallback();
+    try { return await fn(); } catch { persistent = false; db = null; return fallback(); }
+  }
+  return {
+    open,
+    get persistent() { return persistent; },
+    all: (s) => safe(() => req(s, "readonly", (o) => o.getAll()), () => memory[s].slice()),
+    put: (s, v) => safe(() => req(s, "readwrite", (o) => o.put(v)), () => {
+      memory[s] = memory[s].filter((x) => x.id !== v.id).concat([v]);
+    }),
+    del: (s, id) => safe(() => req(s, "readwrite", (o) => o.delete(id)), () => {
+      memory[s] = memory[s].filter((x) => x.id !== id);
+    }),
+    getConsent: () => safe(async () => !!(await req("meta", "readonly", (o) => o.get("consent"))), () => memory.consent),
+    setConsent: () => safe(() => req("meta", "readwrite", (o) => o.put({ k: "consent", v: true })), () => { memory.consent = true; }),
+  };
+})();
+
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2));
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// ---------------- state ----------------
+const S = {
+  tab: "analyse",
+  cats: [],
+  recordings: [],
+  catId: null,
+  stage: "idle", // idle | loading | clip | analysing | result | saved
+  clip: null,    // { blob, mime, samples8k, duration, peaks, url, sample?: true }
+  trim: [0, 0],
+  result: null,
+  label: null,
+  note: "",
+  error: "",
+  savedId: null,
+  flash: "",
+  filterCat: "all",
+  filterLabel: "all",
+  confirmDelete: null,
+  photoDraft: null,
+};
+
+// ---------------- audio helpers ----------------
+async function decodeToMono(blob) {
+  const buf = await blob.arrayBuffer();
+  const Ctx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  const ctx = new Ctx(1, 1, 44100);
+  const audio = await new Promise((res, rej) => {
+    const p = ctx.decodeAudioData(buf, res, rej);
+    if (p && p.then) p.then(res, rej);
+  });
+  const n = audio.length, ch = audio.numberOfChannels, mono = new Float64Array(n);
+  for (let c = 0; c < ch; c++) { const d = audio.getChannelData(c); for (let i = 0; i < n; i++) mono[i] += d[i] / ch; }
+  return { samples: mono, rate: audio.sampleRate };
+}
+function peaksOf(y, bins = 160) {
+  const step = Math.max(1, Math.floor(y.length / bins)), out = [];
+  let max = 0;
+  for (let i = 0; i < bins; i++) {
+    let p = 0;
+    for (let j = i * step; j < Math.min((i + 1) * step, y.length); j++) p = Math.max(p, Math.abs(y[j]));
+    out.push(p); max = Math.max(max, p);
+  }
+  return out.map((p) => (max ? p / max : 0));
+}
+function wavBlob(y, rate = 8000) {
+  const n = y.length, b = new ArrayBuffer(44 + n * 2), v = new DataView(b);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); w(8, "WAVE"); w(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, "data"); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, y[i])) * 32767, true);
+  return new Blob([b], { type: "audio/wav" });
+}
+function drawWave(canvas, peaks, keep = [0, 1], progress) {
+  const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+  if (!w) return;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const g = canvas.getContext("2d");
+  g.scale(dpr, dpr);
+  const css = getComputedStyle(document.documentElement);
+  const ink = css.getPropertyValue("--ink").trim(), faint = css.getPropertyValue("--rule").trim(), acc = css.getPropertyValue("--marigold").trim();
+  const bar = w / peaks.length;
+  peaks.forEach((p, i) => {
+    const f = (i + 0.5) / peaks.length, inside = f >= keep[0] && f <= keep[1];
+    g.fillStyle = progress !== undefined && f <= progress && inside ? acc : inside ? ink : faint;
+    const bh = Math.max(2, p * (h - 8));
+    g.beginPath();
+    if (g.roundRect) g.roundRect(i * bar + bar * 0.18, h / 2 - bh / 2, Math.max(1.5, bar * 0.64), bh, 2);
+    else g.rect(i * bar + bar * 0.18, h / 2 - bh / 2, Math.max(1.5, bar * 0.64), bh);
+    g.fill();
+  });
+}
+
+// ---------------- the analysis (all on this device) ----------------
+const SITS = ["food", "brushing", "isolation"];
+const round5 = (v) => Math.round(v * 1e5) / 1e5;
+
+/** Features + the general model's situation probabilities for one clip (no personal data). */
+function describeClip(y) {
+  let segs = F.segments(y);
+  if (!segs.length) segs = [F.activeSegment(y)];
+  const X = segs.map(F.extract);
+  const features = X[0].map((_, i) => round5(X.reduce((s, x) => s + x[i], 0) / X.length));
+  const probs = X.map((x) => M.predictProba(MODEL.context, x));
+  const general = MODEL.contexts.map((_, k) => round5(probs.reduce((s, pr) => s + pr[k], 0) / probs.length));
+  return { segs, X, features, general };
+}
+
+/** One cat's labelled clips, as training examples for the personal model. */
+function examplesFor(catId, exceptId) {
+  return S.recordings
+    .filter((r) => r.catId === catId && r.id !== exceptId && SITS.includes(r.userLabel)
+      && r.result.detection !== "not_detected" && Array.isArray(r.result.features))
+    .map((r) => ({ x: r.result.features, k: MODEL.contexts.indexOf(r.userLabel) }));
+}
+
+function analyse(y, examples = []) {
+  const dur = y.length / F.SR;
+  const base = { model_version: MODEL.model_version, duration_s: Math.round(dur * 100) / 100 };
+  if (F.isSilent(y)) {
+    return { ...base, detection: "not_detected", reason: "silence", contexts: [], context_unsure: true,
+      evidence: ["The clip is almost silent, so there was nothing to analyse."] };
+  }
+  const { segs, X, features, general } = describeClip(y);
+  const total = segs.reduce((s, x) => s + x.length, 0) / F.SR;
+  const evidence = [`Found ${segs.length} separate sound${segs.length === 1 ? "" : "s"} in the clip (${total.toFixed(1)} s in total) and analysed each one.`];
+  const longest = segs.reduce((a, b) => (b.length > a.length ? b : a));
+  const pitch = F.describePitch(longest);
+  if (pitch) evidence.push(`Main pitch around ${pitch.hz} Hz, ${pitch.shape} over the sound.`);
+  const track = F.pitchTrack(longest).map((p) => ({ t: Math.round(p.t * 1000) / 1000, hz: Math.round(p.hz) }));
+  const pitchInfo = pitch && track.length >= 4 ? { hz: pitch.hz, shape: pitch.shape, track } : null;
+
+  const th = MODEL.detector_thresholds;
+  const p = Math.max(...X.map((x) => M.predictProba(MODEL.detector, x.slice(0, MODEL.detector_cols))[1]));
+  const detection = p >= th.likely ? "likely" : p < th.not_detected_below ? "not_detected" : "uncertain";
+  evidence.push(`Cat screening compares each sound with ${MODEL.stats.n_cat_clips} cat clips and ${MODEL.stats.n_other_clips} other sounds (dogs, people, traffic, rain and more).`);
+  if (detection === "not_detected") {
+    return { ...base, detection, reason: "not_cat", contexts: [], context_unsure: true, evidence, features, general, pitch: pitchInfo };
+  }
+  const personal = M.personalProba(MODEL, features, examples);
+  const mean = M.blend(general, personal);
+  const generalTop = MODEL.contexts[general.indexOf(Math.max(...general))];
+  const order = mean.map((v, i) => i).sort((a, b) => mean[b] - mean[a]);
+  const unsure = mean[order[0]] < MODEL.context_abstain_below;
+  const contexts = [];
+  order.forEach((i, rank) => {
+    if (rank === 0 || mean[i] >= 0.25) contexts.push({ id: MODEL.contexts[i], rank: rank === 0 && !unsure ? "closest match" : "possible" });
+  });
+  evidence.push(`Situations come from the CatMeows study: ${MODEL.stats.n_meows} meows from ${MODEL.stats.n_cats} cats, recorded in only these 3 situations. Your cat may be in a different situation entirely.`);
+  if (personal) evidence.push(`Also compared with ${personal.n} clip${personal.n === 1 ? "" : "s"} you labelled for this cat, which count for ${Math.round(personal.weight * 100)}% of the answer.`);
+  const learning = personal ? { n: personal.n, weight: round5(personal.weight), general_top: generalTop, changed: generalTop !== contexts[0].id } : null;
+  return { ...base, detection, contexts, context_unsure: unsure, evidence, features, general, learning, pitch: pitchInfo };
+}
+
+// ---------------- share card ----------------
+const CAPTIONS = {
+  food: ["The bowl is visibly empty. Please advise.", "Dinner was due four minutes ago.", "I have been starving since breakfast."],
+  brushing: ["I will allow three more strokes.", "This is a spa, not a wrestling match.", "Fine. The left side too."],
+  isolation: ["Where did everyone go?", "New room. Strong opinions.", "Hello? Is this thing on?"],
+  other: ["I have a complaint and it is long.", "No further questions.", "You know what you did."],
+};
+CAPTIONS.unknown = CAPTIONS.other;
+function captionFor(label, seed) {
+  let h = 0;
+  for (const c of seed) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  const list = CAPTIONS[label] || CAPTIONS.other;
+  return list[h % list.length];
+}
+async function makeCard({ catName, caption, peaks, photo }) {
+  try { await document.fonts.ready; } catch {}
+  const W = 1080, H = 1350, c = document.createElement("canvas");
+  c.width = W; c.height = H;
+  const g = c.getContext("2d");
+  const ink = "#23213a", paper = "#f2f1fa", mari = "#ffb627", soft = "#5d5977";
+  g.fillStyle = paper; g.fillRect(0, 0, W, H);
+  g.save(); g.beginPath(); g.arc(160, 190, 80, 0, Math.PI * 2); g.fillStyle = mari; g.fill(); g.clip();
+  if (photo) { try { const bmp = await createImageBitmap(photo); g.drawImage(bmp, 80, 110, 160, 160); } catch {} }
+  else {
+    g.fillStyle = ink; g.font = "800 90px 'Bricolage Grotesque', sans-serif"; g.textAlign = "center"; g.textBaseline = "middle";
+    g.fillText(catName.slice(0, 1).toUpperCase(), 160, 194);
+  }
+  g.restore();
+  g.textAlign = "left"; g.textBaseline = "alphabetic"; g.fillStyle = ink;
+  g.font = "800 88px 'Bricolage Grotesque', sans-serif"; g.fillText(catName.slice(0, 16), 280, 220);
+  const bar = (W - 160) / peaks.length;
+  peaks.forEach((p, i) => {
+    const bh = Math.max(6, p * 260);
+    g.fillStyle = ink; g.fillRect(80 + i * bar + bar * 0.15, 510 - bh / 2, bar * 0.7, bh);
+  });
+  g.font = "800 76px 'Bricolage Grotesque', sans-serif";
+  const words = ("“" + caption + "”").split(" "), lines = [];
+  let line = "";
+  for (const wd of words) {
+    const t = line ? line + " " + wd : wd;
+    if (g.measureText(t).width > W - 160 && line) { lines.push(line); line = wd; } else line = t;
+  }
+  lines.push(line);
+  lines.slice(0, 4).forEach((l, i) => g.fillText(l, 80, 800 + i * 92));
+  g.fillStyle = mari; g.beginPath(); g.roundRect ? g.roundRect(80, H - 210, 520, 72, 36) : g.rect(80, H - 210, 520, 72); g.fill();
+  g.fillStyle = ink; g.font = "700 38px 'Atkinson Hyperlegible', sans-serif"; g.fillText("For fun. Not a translation.", 112, H - 161);
+  g.fillStyle = soft; g.font = "400 34px 'Atkinson Hyperlegible', sans-serif"; g.fillText("MeowMemo, a journal for your cat's sounds", 80, H - 70);
+  return await new Promise((r) => c.toBlob(r, "image/png"));
+}
+let downloadsApi;
+async function saveFile(filename, data) {
+  try {
+    if (downloadsApi === undefined) downloadsApi = window.claude ? await window.claude.use("downloads") : null;
+  } catch { downloadsApi = null; }
+  if (!downloadsApi) return "Saving files isn't available in this view.";
+  try { await downloadsApi.save({ filename, data }); return "Saved."; }
+  catch (e) {
+    const code = e && e.code;
+    if (code === "declined") return "";
+    if (code === "rate_limited") return "A save is already waiting for your answer.";
+    return "Saving files isn't available in this view.";
+  }
+}
+
+// ---------------- rendering ----------------
+const app = document.getElementById("app");
+function avatarHtml(cat, size = 32) {
+  const inner = cat.photoUrl ? `<img src="${cat.photoUrl}" alt="">` : ART.catAvatar(cat.name);
+  return `<span class="avatar" aria-hidden="true" style="width:${size}px;height:${size}px;font-size:${Math.round(size * 0.42)}px">${inner}</span>`;
+}
+function catPicker() {
+  return `<div class="chips" role="group" aria-label="Which cat?">${S.cats.map((c) =>
+    `<button type="button" class="chip" data-act="pick-cat" data-id="${c.id}" aria-pressed="${c.id === S.catId}">${avatarHtml(c)}${esc(c.name)}</button>`
+  ).join("")}</div>`;
+}
+function addCatForm(id) {
+  return `<form class="panel stack" data-form="add-cat" id="${id}">
+    <label class="field">Cat's name<input type="text" name="name" id="${id}-name" maxlength="30" autocomplete="off" required></label>
+    <label class="field"><span>Photo <span class="soft">(optional)</span></span><input type="file" name="photo" id="${id}-photo" accept="image/*"></label>
+    <div><button class="primary" type="submit">Add cat</button></div>
+  </form>`;
+}
+
+const ICON = (paths, extra = "") => `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ${extra}>${paths}</svg>`;
+const ICONS = {
+  food: ICON(`<path d="M3 11h18c0 4.4-4 8-9 8s-9-3.6-9-8z"/><path d="M8.5 11c.3-1.4 1.6-2.5 3.5-2.5s3.2 1.1 3.5 2.5"/><path d="M12 3v3"/>`),
+  brushing: ICON(`<rect x="3" y="4" width="13" height="6" rx="2"/><path d="M5.5 10v4M8.5 10v4M11.5 10v4"/><path d="M16 7h3a2 2 0 0 1 2 2v11"/>`),
+  isolation: ICON(`<path d="M6 21V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v17"/><path d="M3 21h18"/><circle cx="14.5" cy="12.5" r="1" fill="currentColor"/>`),
+  other: ICON(`<circle cx="6" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="18" cy="12" r="1.3" fill="currentColor"/>`),
+  unknown: ICON(`<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.4 2.3c-.6.3-.9.8-.9 1.4v.3"/><circle cx="12" cy="16.8" r=".6" fill="currentColor"/>`),
+  check: ICON(`<path d="M5 12.5l4.5 4.5L19 7.5"/>`),
+  maybe: ICON(`<circle cx="12" cy="12" r="9"/><path d="M12 7.5v5"/><circle cx="12" cy="16.3" r=".6" fill="currentColor"/>`),
+  none: ICON(`<circle cx="12" cy="12" r="9"/><path d="M8.5 8.5l7 7M15.5 8.5l-7 7"/>`),
+  spark: ICON(`<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/>`),
+  wave: ICON(`<path d="M3 12h2M7 8v8M11 5v14M15 8v8M19 10.5v3"/>`),
+  dog: ICON(`<path d="M5 9l-1.5-4L8 7h6l4.5-2L17 9"/><path d="M5 9c-1 6 2 10 7 10s8-4 7-10"/><circle cx="9.5" cy="12" r=".7" fill="currentColor"/><circle cx="14.5" cy="12" r=".7" fill="currentColor"/><path d="M11 15.5h2"/>`),
+};
+const CAT_GLYPH = `<svg viewBox="0 0 64 64" aria-hidden="true"><path d="M14 30 L18 8 L28 20 H36 L46 8 L50 30 C50 42 42 50 32 50 C22 50 14 42 14 30Z" fill="currentColor"/><circle cx="25" cy="31" r="3" fill="#f2b33d"/><circle cx="39" cy="31" r="3" fill="#f2b33d"/></svg>`;
+const LOCK = `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>`;
+const brandRow = () => `<div class="brand"><span class="logo">${CAT_GLYPH}</span><span class="word">MeowMemo</span><span class="badge">${LOCK}On your device</span></div>`;
+const STATUS = {
+  likely: { cls: "ok", icon: "check", text: "Cat sound" },
+  uncertain: { cls: "maybe", icon: "maybe", text: "Maybe a cat" },
+  not_detected: { cls: "no", icon: "none", text: "No cat detected" },
+};
+const statusChip = (det) => `<span class="status ${STATUS[det].cls}">${ICONS[STATUS[det].icon]}${STATUS[det].text}</span>`;
+
+const ADD_ICON = `<svg viewBox="0 0 64 64" aria-hidden="true"><path d="M14 30 L18 8 L28 20 H36 L46 8 L50 30 C50 42 42 50 32 50 C22 50 14 42 14 30Z" fill="currentColor"/><circle cx="25" cy="31" r="3" fill="#f2b33d"/><circle cx="39" cy="31" r="3" fill="#f2b33d"/><path d="M28 40 Q32 43 36 40" stroke="#f2b33d" stroke-width="2.5" fill="none" stroke-linecap="round"/></svg>`;
+
+function timeAgo(ts) {
+  const m = Math.round((Date.now() - ts) / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} h ago`;
+  const d = Math.round(h / 24);
+  return d === 1 ? "yesterday" : `${d} days ago`;
+}
+function stickerFor(r) {
+  if (SITS.includes(r.userLabel)) return ART[r.userLabel];
+  const top = r.result.contexts[0];
+  return top && r.result.detection !== "not_detected" ? ART[top.id] : ART.unknown;
+}
+function recentStrip() {
+  const recs = S.recordings.filter((r) => r.catId === S.catId).slice(0, 3);
+  if (!recs.length) return "";
+  const cat = S.cats.find((c) => c.id === S.catId);
+  return `<section class="stack" style="gap:10px">
+    <div class="row" style="justify-content:space-between"><h3>${esc(cat.name)}'s recent clips</h3><a class="small soft" href="#journal">See all</a></div>
+    <div class="recent">${recs.map((r) => `<a class="mini" href="#journal">${stickerFor(r)}<b>${esc(labelText(r.userLabel))}</b><span>${timeAgo(r.createdAt)}</span></a>`).join("")}</div>
+  </section>`;
+}
+
+function viewAnalyse() {
+  const parts = [`<header class="stack hero-head" style="gap:14px">
+    ${brandRow()}
+    <span class="doodle yarn">${ART.yarn}</span><span class="doodle spark">${ART.sparkle}</span>
+    <h1>What was that sound?</h1>
+    <p class="soft" style="max-width:34ch">Add a meow, see which situation it resembles, then note what was really happening.</p>
+  </header>`];
+  if (!store.persistent) parts.push(`<p class="note">This browser isn't keeping data for this page, so your journal will clear when you close it.</p>`);
+  if (!S.cats.length) {
+    parts.push(`<section class="stack"><h2>First, who's the cat?</h2>${addCatForm("first-cat")}</section>`);
+    parts.push(howItWorks());
+    return parts.join("");
+  }
+  parts.push(catPicker());
+
+  if (S.stage === "idle" || S.stage === "loading") {
+    parts.push(`<section class="stage-card">
+      <span class="peek">${ART.peek}</span>
+      <span class="paws">${ART.paws}</span>
+      <div class="stage">
+        <label class="big-add" role="button" tabindex="0" id="add-clip-label">
+          ${S.stage === "loading" ? `<span class="spin" aria-hidden="true"></span><span>Reading clip…</span>` : `${ADD_ICON}<span>Add a clip</span>`}
+          <input class="sr-only" type="file" id="clip-input" accept="audio/*,.m4a,.wav,.mp3,.webm,.ogg,.aac,.caf">
+        </label>
+      </div>
+      <p class="hint">${MIN_S}-${MAX_S} seconds, close to your cat. On a phone, use your voice recorder or pick a voice memo.</p>
+    </section>
+    <section class="panel try taped">
+      <div class="try-head">${ART.happy}<div><h3>No cat nearby?</h3><p class="soft small">Try the app with a built-in clip.</p></div></div>
+      <div class="row">
+        <button class="pill-btn" data-act="sample" data-key="cat">${ICONS.wave}Sample meow</button>
+        <button class="pill-btn" data-act="sample" data-key="dog">${ICONS.dog}Dog bark</button>
+      </div>
+    </section>
+    ${recentStrip()}
+    <section class="panel taped tips">
+      <h3>For a clear recording</h3>
+      <ul>
+        <li>${ART.tipClose}<span><b>Get close</b>Phone within an arm's length of your cat</span></li>
+        <li>${ART.tipQuiet}<span><b>Keep it quiet</b>No TV, music or talking over the meow</span></li>
+        <li>${ART.tipTime}<span><b>2 to 15 seconds</b>Trim the clip around the meows</span></li>
+      </ul>
+    </section>
+    <section class="stack" style="gap:10px">
+      <h3>What it compares against</h3>
+      <div class="trio">
+        <figure class="s-food">${ART.food}<figcaption>Waiting for food</figcaption></figure>
+        <figure class="s-brushing">${ART.brushing}<figcaption>Being brushed</figcaption></figure>
+        <figure class="s-isolation">${ART.isolation}<figcaption>Alone somewhere new</figcaption></figure>
+      </div>
+      <p class="soft small">The three situations in the CatMeows study. MeowMemo shows which one a meow sounds most like, or says it's unsure.</p>
+    </section>`);
+  }
+  if (S.error) parts.push(`<p class="alert" role="alert">${esc(S.error)}</p>`);
+
+  if (S.clip && !["idle", "loading"].includes(S.stage)) {
+    const len = S.trim[1] - S.trim[0];
+    const bad = len < MIN_S || len > MAX_S;
+    parts.push(`<section class="panel stack" style="gap:12px">
+      ${S.clip.sample ? `<p class="note">${esc(S.clip.sampleNote)}</p>` : ""}
+      <canvas class="wave" id="wave" role="img" aria-label="Waveform of the clip"></canvas>
+      <div class="row" style="justify-content:space-between">
+        <button class="outline" data-act="play" style="padding:7px 16px">Play</button>
+        <span id="sel-len" class="${bad ? "danger" : "soft"}" style="font-variant-numeric:tabular-nums">${len.toFixed(1)} s selected</span>
+      </div>
+      ${S.stage === "clip" ? `
+        <label class="field small"><span class="label-row">Start <span class="soft" id="trim-start-val">${S.trim[0].toFixed(1)} s</span></span>
+          <input type="range" id="trim-start" min="0" max="${S.clip.duration}" step="0.1" value="${S.trim[0]}"></label>
+        <label class="field small"><span class="label-row">End <span class="soft" id="trim-end-val">${S.trim[1].toFixed(1)} s</span></span>
+          <input type="range" id="trim-end" min="0" max="${S.clip.duration}" step="0.1" value="${S.trim[1]}"></label>` : ""}
+    </section>`);
+    if (S.stage === "clip" || S.stage === "analysing") {
+      parts.push(`<div class="row">
+        <button class="primary" style="flex:1" id="analyse-btn" data-act="analyse" ${S.stage === "analysing" || bad ? "disabled" : ""}>
+          ${S.stage === "analysing" ? `<span class="spin" aria-hidden="true"></span> Analysing…` : "Analyse"}</button>
+        <button class="quiet" data-act="discard">Discard</button>
+      </div>`);
+      if (len > MAX_S) parts.push(`<p class="danger">Trim the clip to ${MAX_S} seconds or less.</p>`);
+    }
+    if (S.result && ["result", "saved"].includes(S.stage)) parts.push(resultCard(S.result));
+    if (S.stage === "result") {
+      const cat = S.cats.find((c) => c.id === S.catId);
+      parts.push(`<section class="panel stack">
+        <div role="group" aria-labelledby="happening"><h3 id="happening">What was actually happening?</h3>
+          <p class="soft small">Your answer teaches MeowMemo how ${esc(cat ? cat.name : "your cat")} sounds.</p>
+          <div class="choices" style="margin-top:10px">${LABELS.map((l) =>
+            `<button type="button" class="choice s-${l.id}" data-act="label" data-id="${l.id}" aria-pressed="${S.label === l.id}">${ART[l.id]}${l.text}</button>`).join("")}</div>
+        </div>
+        <label class="field"><span>Note <span class="soft">(optional)</span></span>
+          <textarea id="note" rows="2" maxlength="280" placeholder="e.g. sitting by the door at 7am">${esc(S.note)}</textarea></label>
+        <div class="row"><button class="primary" style="flex:1" data-act="save">Save to journal</button>
+          <button class="quiet" data-act="discard">Discard</button></div>
+      </section>`);
+    }
+    if (S.stage === "saved") {
+      const cat = S.cats.find((c) => c.id === S.catId);
+      parts.push(`<section class="saved stack${S.justSaved ? " stamp" : ""}" style="gap:12px">
+        <div class="saved-head">${ART.happy}<h2>Saved to ${esc(cat ? cat.name : "the")}'s journal</h2></div>
+        <div class="row">
+          <button class="btn-marigold" data-act="discard">Add another clip</button>
+          <button class="outline" data-act="card-current">Make a share card</button>
+          <a class="btn" style="color:inherit;text-decoration:underline" href="#journal">Open journal</a>
+        </div>
+        ${S.flash ? `<p>${esc(S.flash)}</p>` : ""}
+        <p class="soft small">Share cards use a joke caption and say so on the card. Nothing is posted anywhere unless you share it.</p>
+      </section>`);
+    }
+  }
+  parts.push(howItWorks());
+  return parts.join("");
+}
+
+function situationList(r) {
+  const listed = r.contexts.map((c) => c.id);
+  const rest = ["food", "brushing", "isolation"].filter((id) => !listed.includes(id));
+  const rows = r.contexts.map((c) => ({ id: c.id, kind: c.rank === "closest match" ? "top" : "possible" }))
+    .concat(rest.map((id) => ({ id, kind: "less" })));
+  const TAG = { top: "Closest match", possible: "Possible", less: "Less likely" };
+  return `<ul class="sits">${rows.map((x) => `<li class="sit ${x.kind} s-${x.id}">
+    <span class="tile">${ART[x.id]}</span>
+    <span class="name">${CONTEXT_TEXT[x.id][0].toUpperCase() + CONTEXT_TEXT[x.id].slice(1)}</span>
+    <span class="tag">${TAG[x.kind]}</span></li>`).join("")}</ul>`;
+}
+
+/** Pitch over the loudest sound, drawn from the clip itself. */
+function pitchChart(p) {
+  if (!p || !p.track || p.track.length < 4) return "";
+  const W = 320, H = 96, padL = 44, padR = 8, padT = 10, padB = 22;
+  // median-of-5 smoothing, so one-frame octave slips in the pitch tracker don't draw as spikes
+  // fold octave errors (the tracker sometimes locks onto half or double the real pitch) toward the median
+  const sorted = p.track.map((x) => x.hz).sort((a, b) => a - b), m0 = sorted[Math.floor(sorted.length / 2)];
+  const raw = p.track.map((x) => { let v = x.hz; while (v < m0 / 1.6) v *= 2; while (v > m0 * 1.6) v /= 2; return v; });
+  const med = raw.map((_, i) => { const w = raw.slice(Math.max(0, i - 2), i + 3).sort((a, b) => a - b); return w[Math.floor(w.length / 2)]; });
+  const track = p.track.map((x, i) => ({ t: x.t, hz: med[i] }));
+  p = { ...p, track };
+  const hz = med, t = p.track.map((x) => x.t);
+  const lo = Math.max(0, Math.floor((Math.min(...hz) - 40) / 50) * 50), hi = Math.ceil((Math.max(...hz) + 40) / 50) * 50;
+  const t0 = t[0], t1 = t[t.length - 1] || t0 + 0.1;
+  const X = (v) => padL + ((v - t0) / (t1 - t0 || 1)) * (W - padL - padR);
+  const Y = (v) => padT + (1 - (v - lo) / (hi - lo || 1)) * (H - padT - padB);
+  const pts = p.track.map((x) => `${X(x.t).toFixed(1)},${Y(x.hz).toFixed(1)}`).join(" ");
+  const area = `${X(t0).toFixed(1)},${(H - padB).toFixed(1)} ${pts} ${X(t1).toFixed(1)},${(H - padB).toFixed(1)}`;
+  return `<figure class="pitch">
+    <figcaption><b>Pitch over the sound</b><span>around ${p.hz} Hz, ${p.shape}</span></figcaption>
+    <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Pitch chart: around ${p.hz} Hz, ${p.shape}">
+      <line x1="${padL}" x2="${W - padR}" y1="${Y(hi)}" y2="${Y(hi)}" class="grid"/>
+      <line x1="${padL}" x2="${W - padR}" y1="${Y((lo + hi) / 2)}" y2="${Y((lo + hi) / 2)}" class="grid"/>
+      <line x1="${padL}" x2="${W - padR}" y1="${Y(lo)}" y2="${Y(lo)}" class="axis"/>
+      <text x="${padL - 6}" y="${Y(hi) + 4}" text-anchor="end">${hi} Hz</text>
+      <text x="${padL - 6}" y="${Y(lo) + 4}" text-anchor="end">${lo}</text>
+      <text x="${W - padR}" y="${H - 5}" text-anchor="end">${(t1 - t0).toFixed(1)} s</text>
+      <polygon points="${area}" class="fill"/>
+      <polyline points="${pts}" class="line"/>
+      <circle cx="${X(t1).toFixed(1)}" cy="${Y(hz[hz.length - 1]).toFixed(1)}" r="4" class="end"/>
+    </svg>
+  </figure>`;
+}
+
+function learningNote(r, catName) {
+  if (r.detection === "not_detected") return "";
+  if (r.learning) {
+    return `<div class="learn on">${ICONS.spark}<div><b>Tuned to ${esc(catName)}</b><span>Learned from ${r.learning.n} of your labels.${
+      r.learning.changed ? ` The general model alone would have said ${CONTEXT_TEXT[r.learning.general_top]}.` : ""}</span></div></div>`;
+  }
+  const n = examplesFor(S.catId).length;
+  return `<div class="learn">${ICONS.spark}<div><b>Not tuned to ${esc(catName)} yet</b><span>${
+    n ? `${n} label${n === 1 ? "" : "s"} so far. It starts learning once you've labelled 2 different situations.`
+      : "Label clips below and MeowMemo learns how your cat sounds."}</span></div></div>`;
+}
+
+function resultCard(r) {
+  const body = r.detection === "not_detected"
+    ? `<p class="soft">${r.reason === "silence" ? "The clip is almost silent. Try recording closer to your cat."
+        : "This sound doesn't match the cat sounds the model knows. If it was your cat, save it anyway and label it, so your journal shows what your cat really sounds like."}</p>`
+    : `<p style="font-weight:700">${r.context_unsure ? "It could fit any of these situations. The model can't pick one." : "It most resembles meows recorded when cats were:"}</p>
+       ${situationList(r)}
+       ${pitchChart(r.pitch)}
+       ${learningNote(r, (S.cats.find((c) => c.id === S.catId) || { name: "your cat" }).name)}`;
+  return `<section class="panel stack${S.justAnalysed ? " reveal" : ""}" style="gap:14px">
+    <div class="result-head"><div class="stack" style="gap:10px">${statusChip(r.detection)}<h2>${DETECTION_HEAD[r.detection]}</h2></div>
+      <span class="face">${r.detection === "not_detected" ? ART.puzzled : ART.happy}</span></div>
+    ${body}
+    <details><summary>What this is based on</summary><ul>${r.evidence.map((e) => `<li>${esc(e)}</li>`).join("")}<li>Model version ${esc(r.model_version)}.</li></ul></details>
+    <p class="note">This is a guess about which recorded situation the sound resembles, not a translation of what your cat means. You know what was really happening, so tell the journal below.</p>
+  </section>`;
+}
+
+function howItWorks() {
+  const c = METRICS.context, d = METRICS.detector;
+  const pct = (x) => Math.round(x * 100) + "%";
+  const sel = c.selective[String(c.abstain_threshold)];
+  return `<details class="panel" style="margin-top:8px"><summary>How well does it work?</summary>
+    <div class="stack" style="gap:12px;margin-top:12px">
+      <p class="soft small">Everything runs on your device; clips are never uploaded. Scores below come from cats and recordings the model never trained on.</p>
+      <table class="scores"><tbody>
+        <tr><td>Cats correctly called "likely cat" (CatMeows study cats)</td><td>${pct(d.recall_catmeows_at_likely)}</td></tr>
+        <tr><td>Cats from other recordings (ESC-50) called "likely cat"</td><td>${pct(d.recall_esc50_cats_at_likely)}</td></tr>
+        <tr><td>Dog barks wrongly called "likely cat"</td><td>${pct(d.false_likely_rate.dog)}</td></tr>
+        <tr><td>Human sounds wrongly called "likely cat"</td><td>${pct(d.false_likely_rate.people)}</td></tr>
+        <tr><td>Situation guessed right, all clips (chance is 33%)</td><td>${pct(c.accuracy_unseen_cats)}</td></tr>
+        <tr><td>Situation guessed right when it names one instead of saying "unsure" (${pct(sel.coverage)} of clips)</td><td>${pct(sel.accuracy_when_answering)}</td></tr>
+        ${METRICS.personal ? `<tr><td>Situation guessed right once the owner has labelled 5 / 10 of their cat's clips (simulated on the study cats)</td><td>${pct(METRICS.personal["5"].personal_accuracy)} / ${pct(METRICS.personal["10"].personal_accuracy)}</td></tr>` : ""}
+      </tbody></table>
+      <p class="soft small">Trained on <a href="https://zenodo.org/records/4008297" target="_blank" rel="noopener">CatMeows</a> (21 cats, 2 breeds, 3 situations) and <a href="https://github.com/karolpiczak/ESC-50" target="_blank" rel="noopener">ESC-50</a>. It does not read emotions and never checks health. If you're worried about your cat, talk to a vet.</p>
+    </div></details>`;
+}
+
+function viewJournal() {
+  const recs = S.recordings.filter((r) => (S.filterCat === "all" || r.catId === S.filterCat) && (S.filterLabel === "all" || r.userLabel === S.filterLabel));
+  const parts = [`<header class="stack" style="gap:14px">${brandRow()}<h1>Journal</h1></header>`];
+  if (!S.recordings.length) {
+    parts.push(`<div class="panel empty">${ART.notebook}<h2>No clips yet</h2>
+      <p class="soft" style="max-width:30ch">Saved clips show up here, with what the model guessed and what you said was happening.</p>
+      <a class="btn primary" href="#analyse">Add a clip</a></div>`);
+    return parts.join("");
+  }
+  const comparable = S.recordings.filter((r) => r.result.detection !== "not_detected" && ["food", "brushing", "isolation"].includes(r.userLabel) && r.result.contexts[0]);
+  const matched = comparable.filter((r) => r.result.contexts[0].id === r.userLabel).length;
+  parts.push(`<div class="summary">
+    <div class="stat"><b>${S.recordings.length}</b><span>clip${S.recordings.length === 1 ? "" : "s"} saved</span></div>
+    <div class="stat"><b>${new Set(S.recordings.map((r) => r.catId)).size}</b><span>cat${new Set(S.recordings.map((r) => r.catId)).size === 1 ? "" : "s"}</span></div>
+    <div class="stat"><b>${comparable.length ? `${matched}/${comparable.length}` : "–"}</b><span>${comparable.length ? "matched your label" : "label a clip to compare"}</span></div>
+  </div>`);
+  const learnCats = S.filterCat === "all" ? S.cats : S.cats.filter((c) => c.id === S.filterCat);
+  parts.push(learnCats.map(learningPanel).join(""));
+  parts.push(`<div class="filters">
+    <label class="field">Cat<select id="filter-cat"><option value="all">All cats</option>${S.cats.map((c) => `<option value="${c.id}" ${S.filterCat === c.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></label>
+    <label class="field">Your label<select id="filter-label"><option value="all">All labels</option>${LABELS.map((l) => `<option value="${l.id}" ${S.filterLabel === l.id ? "selected" : ""}>${l.text}</option>`).join("")}</select></label>
+  </div>
+  <div class="row" style="justify-content:space-between"><p class="soft small">${recs.length} of ${S.recordings.length} clips</p>
+    <button class="quiet" data-act="export" style="padding:4px 8px">Export CSV</button></div>
+  ${S.flash ? `<p class="soft small">${esc(S.flash)}</p>` : ""}`);
+  const groups = [];
+  for (const r of recs) {
+    const day = new Date(r.createdAt).toDateString();
+    if (!groups.length || groups[groups.length - 1].day !== day) groups.push({ day, items: [] });
+    groups[groups.length - 1].items.push(r);
+  }
+  const today = new Date().toDateString(), yest = new Date(Date.now() - 864e5).toDateString();
+  const dayName = (d) => d === today ? "Today" : d === yest ? "Yesterday" : new Date(d).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+  parts.push(groups.map((g) => `<section class="stack" style="gap:12px"><h3 class="day">${dayName(g.day)}</h3>${g.items.map(entryHtml).join("")}</section>`).join(""));
+  return parts.join("");
+}
+/** How much one cat's model has learned, checked honestly: each labelled clip is scored by a
+ *  personal model built from that cat's OTHER labels (leave one out), against the general model alone. */
+function learningPanel(cat) {
+  const ex = examplesFor(cat.id);
+  const counts = SITS.map((id) => ex.filter((e) => e.k === MODEL.contexts.indexOf(id)).length);
+  const covered = counts.filter(Boolean).length;
+  const goal = 10, pct = Math.min(100, Math.round((ex.length / goal) * 100));
+  let check = "";
+  const recs = S.recordings.filter((r) => r.catId === cat.id && SITS.includes(r.userLabel)
+    && r.result.detection !== "not_detected" && Array.isArray(r.result.general));
+  if (recs.length >= 3) {
+    let gen = 0, mine = 0, scored = 0;
+    for (const r of recs) {
+      const truth = MODEL.contexts.indexOf(r.userLabel);
+      const g = r.result.general;
+      const pers = M.personalProba(MODEL, r.result.features, examplesFor(cat.id, r.id));
+      const b = M.blend(g, pers);
+      scored++;
+      if (g.indexOf(Math.max(...g)) === truth) gen++;
+      if (b.indexOf(Math.max(...b)) === truth) mine++;
+    }
+    check = `<p class="small">Checked on your own labels (each clip scored without its own label): <b>${mine} of ${scored}</b> right with ${esc(cat.name)}'s labels, ${gen} of ${scored} with the general model alone. Small numbers, so this will move as you add more.</p>`;
+  }
+  const status = covered >= 2 ? `Learning from ${ex.length} label${ex.length === 1 ? "" : "s"}${ex.length < goal ? `, aim for ${goal} or more` : ""}`
+    : ex.length ? `Label ${covered ? "one more situation" : "2 different situations"} to start learning` : "Not learning yet";
+  return `<section class="panel learn-panel taped">
+    <div class="learn-head">${avatarHtml(cat, 40)}<div style="flex:1;min-width:0"><h3>${esc(cat.name)}'s sound profile</h3><p class="soft small">${status}</p></div></div>
+    <div class="meter" role="img" aria-label="${ex.length} of ${goal} labels"><span style="width:${pct}%"></span></div>
+    <div class="learn-counts">${SITS.map((id, i) => `<span class="lc s-${id}">${ART[id]}<b>${counts[i]}</b></span>`).join("")}</div>
+    ${check}
+  </section>`;
+}
+
+function entryHtml(r) {
+  const cat = S.cats.find((c) => c.id === r.catId);
+  const d = new Date(r.createdAt);
+  const top = r.result.contexts[0];
+  const said = { likely: "Cat sound", uncertain: "Maybe a cat", not_detected: "No cat detected" }[r.result.detection]
+    + (top && r.result.detection !== "not_detected" ? `; ${r.result.context_unsure ? "unsure, maybe" : "most like"} ${CONTEXT_TEXT[top.id]}` : "");
+  const saidIcon = top && r.result.detection !== "not_detected" ? ART[top.id] : ICONS[STATUS[r.result.detection].icon];
+  const comparable = top && r.result.detection !== "not_detected" && ["food", "brushing", "isolation"].includes(r.userLabel);
+  const agree = comparable ? (top.id === r.userLabel
+      ? `<span class="agree yes">Top guess matches your label</span>`
+      : `<span class="agree diff">Different from your label</span>`) : "";
+  const confirming = S.confirmDelete === r.id;
+  return `<article class="panel entry">
+    <div class="row" style="flex-wrap:nowrap">
+      <span class="entry-sticker s-${SITS.includes(r.userLabel) ? r.userLabel : "other"}">${stickerFor(r)}</span>
+      <div style="flex:1;min-width:0"><p style="font-weight:700">${esc(cat ? cat.name : "Unknown cat")}: ${esc(labelText(r.userLabel).toLowerCase())}</p>
+        <p class="soft small">${d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</p></div>
+      <button class="outline" style="padding:6px 14px" data-act="play-rec" data-id="${r.id}">Play</button>
+    </div>
+    <canvas class="wave" style="height:56px" data-wave="${r.id}" role="img" aria-label="Waveform"></canvas>
+    <dl><dt>Model said</dt><dd><span class="said">${saidIcon}${esc(said)}</span></dd>
+      <dt>You said</dt><dd><label class="sr-only" for="lab-${r.id}">Your label</label>
+        <select id="lab-${r.id}" data-relabel="${r.id}">${LABELS.map((l) => `<option value="${l.id}" ${r.userLabel === l.id ? "selected" : ""}>${l.text}</option>`).join("")}</select></dd>
+      ${r.note ? `<dt>Note</dt><dd>${esc(r.note)}</dd>` : ""}</dl>
+    ${agree}
+    <div class="row">
+      ${confirming
+        ? `<span>Delete this clip for good?</span><button class="danger" data-act="del-rec" data-id="${r.id}">Delete</button><button class="quiet" data-act="cancel-del">Keep</button>`
+        : `<button class="quiet" data-act="card" data-id="${r.id}">Share card</button><button class="quiet danger" data-act="ask-del" data-id="${r.id}">Delete</button>`}
+    </div>
+  </article>`;
+}
+
+function viewCats() {
+  const counts = {};
+  S.recordings.forEach((r) => (counts[r.catId] = (counts[r.catId] || 0) + 1));
+  const parts = [`<header class="stack" style="gap:14px">${brandRow()}<h1>Your cats</h1></header><p class="soft">Each clip belongs to one cat, so every cat gets their own journal.</p>`];
+  if (S.cats.length) {
+    parts.push(`<div class="cat-cards">${S.cats.map((c) => {
+      const n = counts[c.id] || 0, confirming = S.confirmDelete === c.id;
+      const ex = examplesFor(c.id).length, pct = Math.min(100, ex * 10);
+      return `<article class="panel cat-card">
+        <div class="row" style="flex-wrap:nowrap;gap:14px">${avatarHtml(c, 64)}
+          <div style="flex:1;min-width:0"><h2>${esc(c.name)}</h2><p class="soft small">${n} clip${n === 1 ? "" : "s"}, ${ex} labelled for learning</p></div></div>
+        <div class="meter" role="img" aria-label="${ex} of 10 labels"><span style="width:${pct}%"></span></div>
+        <div class="row" style="justify-content:space-between">
+          <span class="small soft">${ex >= 10 ? "Sound profile well under way" : `${10 - ex} more label${10 - ex === 1 ? "" : "s"} for a solid sound profile`}</span>
+          ${confirming
+            ? `<span class="row"><button class="danger" data-act="del-cat" data-id="${c.id}">Delete${n ? ` with ${n} clip${n === 1 ? "" : "s"}` : ""}</button><button class="quiet" data-act="cancel-del">Keep</button></span>`
+            : `<button class="quiet danger" data-act="ask-del" data-id="${c.id}">Delete</button>`}
+        </div>
+      </article>`;
+    }).join("")}</div>`);
+  }
+  parts.push(`<h2 style="margin-top:12px">${S.cats.length ? "Add another cat" : "Add your first cat"}</h2>${addCatForm("cats-add")}`);
+  return parts.join("");
+}
+
+function consentModal() {
+  return `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="consent-title"><div class="panel stack" style="gap:12px;padding-top:24px">
+    <span class="peek">${ART.peek}</span>
+    <h2 id="consent-title">Before you start</h2>
+    <ul>
+      <li>Clips you add are analysed right here on your device. Nothing is uploaded.</li>
+      <li>Your cats, clips and labels are kept in this browser only. You can delete any of them at any time.</li>
+      <li>Results describe sound patterns. They are not a translation, and never a health check. If you're worried about your cat, talk to a vet.</li>
+    </ul>
+    <button class="primary full" data-act="consent">I understand</button>
+  </div></div>`;
+}
+
+function drawAllWaves() {
+  const wave = document.getElementById("wave");
+  if (wave && S.clip) drawWave(wave, S.clip.peaks, [S.trim[0] / S.clip.duration, S.trim[1] / S.clip.duration], S.progress);
+  document.querySelectorAll("canvas[data-wave]").forEach((cv) => {
+    const r = S.recordings.find((x) => x.id === cv.dataset.wave);
+    if (r) drawWave(cv, r.peaks, [r.trimStart / r.duration, r.trimEnd / r.duration], S.playingId === r.id ? S.progress : undefined);
+  });
+}
+
+let consentShown = false;
+function render() {
+  const focusId = document.activeElement && document.activeElement.id;
+  const view = S.tab === "journal" ? viewJournal() : S.tab === "cats" ? viewCats() : viewAnalyse();
+  app.innerHTML = `<div class="stack" style="gap:22px">${view}</div>`;
+  document.querySelectorAll("nav.tabs a").forEach((a) => a.setAttribute("aria-current", a.dataset.tab === S.tab ? "page" : "false"));
+  document.getElementById("modal-root").innerHTML = (consentShown ? consentModal() : "")
+    + (S.toast ? `<div class="toast" role="status">${esc(S.toast)}</div>` : "");
+  S.justAnalysed = false;
+  S.justSaved = false;
+  drawAllWaves();
+  if (focusId) { const el = document.getElementById(focusId); if (el) el.focus(); }
+}
+
+// Light update while a trim slider is dragged (a full re-render would drop the drag).
+function updateTrimUI() {
+  const len = S.trim[1] - S.trim[0], bad = len < MIN_S || len > MAX_S;
+  const set = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
+  set("trim-start-val", S.trim[0].toFixed(1) + " s");
+  set("trim-end-val", S.trim[1].toFixed(1) + " s");
+  set("sel-len", len.toFixed(1) + " s selected");
+  const l = document.getElementById("sel-len"); if (l) l.className = bad ? "danger" : "soft";
+  const b = document.getElementById("analyse-btn"); if (b) b.disabled = bad;
+  const w = document.getElementById("wave");
+  if (w) drawWave(w, S.clip.peaks, [S.trim[0] / S.clip.duration, S.trim[1] / S.clip.duration]);
+}
+
+let toastTimer;
+function toast(msg) {
+  S.toast = msg;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { S.toast = ""; document.querySelector(".toast")?.remove(); }, 2600);
+}
+
+// ---------------- actions ----------------
+async function refresh() {
+  const cats = await store.all("cats");
+  cats.sort((a, b) => a.createdAt - b.createdAt);
+  S.cats.forEach((c) => c.photoUrl && URL.revokeObjectURL(c.photoUrl));
+  cats.forEach((c) => { if (c.photo) c.photoUrl = URL.createObjectURL(c.photo); });
+  S.cats = cats;
+  S.recordings = (await store.all("recordings")).sort((a, b) => b.createdAt - a.createdAt);
+  if (!S.cats.find((c) => c.id === S.catId)) S.catId = S.cats.length ? S.cats[S.cats.length - 1].id : null;
+}
+
+async function loadClip(blob, sampleInfo) {
+  S.error = ""; S.stage = "loading"; render();
+  try {
+    const { samples, rate } = await decodeToMono(blob);
+    const duration = samples.length / rate;
+    if (duration < MIN_S) throw new Error(`That clip is ${duration.toFixed(1)} s. Use a clip of at least ${MIN_S} seconds.`);
+    if (duration > 120) throw new Error("That clip is longer than 2 minutes. Use a shorter clip, 2-15 seconds long.");
+    const y8 = F.toModelAudio(samples, rate);
+    if (S.clip && S.clip.url) URL.revokeObjectURL(S.clip.url);
+    S.clip = { samples8k: y8, duration, peaks: peaksOf(y8), url: URL.createObjectURL(blob), ...(sampleInfo || {}) };
+    S.trim = [0, Math.min(duration, MAX_S)];
+    S.result = null; S.label = null; S.note = ""; S.flash = "";
+    S.stage = "clip";
+  } catch (e) {
+    S.stage = "idle";
+    S.error = e && e.message && /seconds|minutes/.test(e.message) ? e.message
+      : "That file couldn't be read as audio. Try a WAV, MP3 or M4A clip, or a voice memo.";
+  }
+  render();
+}
+
+let player = null;
+function playUrl(url, start, end, duration, id) {
+  if (player) { player.pause(); player = null; }
+  S.playingId = id;
+  const a = new Audio(url);
+  player = a;
+  a.addEventListener("loadedmetadata", () => { a.currentTime = start; a.play().catch(() => {}); }, { once: true });
+  a.addEventListener("timeupdate", () => {
+    S.progress = a.currentTime / duration;
+    if (a.currentTime >= end) { a.pause(); }
+    const cv = id ? document.querySelector(`canvas[data-wave="${id}"]`) : document.getElementById("wave");
+    const keep = [start / duration, end / duration];
+    if (cv) drawWave(cv, id ? S.recordings.find((r) => r.id === id).peaks : S.clip.peaks, keep, S.progress);
+  });
+  a.addEventListener("pause", () => { S.progress = undefined; S.playingId = null; render(); });
+}
+
+async function saveRecording() {
+  const y = S.clip.samples8k;
+  const id = uid();
+  await store.put("recordings", {
+    id, catId: S.catId, audio: wavBlob(y), duration: S.clip.duration, peaks: S.clip.peaks,
+    trimStart: S.trim[0], trimEnd: S.trim[1], createdAt: Date.now(),
+    result: S.result, modelVersion: S.result.model_version, userLabel: S.label || "unknown", note: S.note.trim(),
+  });
+  S.savedId = id;
+  await refresh();
+  S.stage = "saved";
+  S.justSaved = true;
+  toast("Saved to the journal");
+  render();
+}
+
+async function shareCard(rec) {
+  const cat = S.cats.find((c) => c.id === rec.catId);
+  const blob = await makeCard({ catName: cat ? cat.name : "My cat", caption: captionFor(rec.userLabel, rec.id), peaks: rec.peaks, photo: cat && cat.photo });
+  return await saveFile(`meowmemo-${(cat ? cat.name : "cat").replace(/[^\w-]+/g, "")}.png`, blob);
+}
+
+async function shrinkPhoto(file) {
+  const bmp = await createImageBitmap(file);
+  const s = Math.min(bmp.width, bmp.height), c = document.createElement("canvas");
+  c.width = c.height = 320;
+  c.getContext("2d").drawImage(bmp, (bmp.width - s) / 2, (bmp.height - s) / 2, s, s, 0, 0, 320, 320);
+  return await new Promise((r) => c.toBlob(r, "image/jpeg", 0.85));
+}
+
+function b64ToBlob(b64, type) {
+  const bin = atob(b64), u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return new Blob([u], { type });
+}
+
+document.addEventListener("click", async (e) => {
+  const link = e.target.closest('a[href^="#"]');
+  if (link) {
+    e.preventDefault();
+    setTab(link.getAttribute("href").slice(1));
+    try { history.replaceState(null, "", link.getAttribute("href")); } catch {}
+    return;
+  }
+  const el = e.target.closest("[data-act]");
+  if (!el) return;
+  const act = el.dataset.act, id = el.dataset.id;
+  if (act === "consent") { await store.setConsent(); consentShown = false; render(); }
+  else if (act === "pick-cat") { S.catId = id; render(); }
+  else if (act === "sample") {
+    const s = SAMPLES[el.dataset.key];
+    loadClip(b64ToBlob(s.wav, "audio/wav"), { sample: true, sampleNote: s.note });
+  }
+  else if (act === "play" && S.clip) playUrl(S.clip.url, S.trim[0], S.trim[1], S.clip.duration, null);
+  else if (act === "analyse" && S.clip) {
+    S.stage = "analysing"; render();
+    await new Promise((r) => setTimeout(r, 30));
+    try {
+      const a = Math.floor(S.trim[0] * F.SR), b = Math.floor(S.trim[1] * F.SR);
+      S.result = analyse(S.clip.samples8k.slice(a, b), examplesFor(S.catId));
+      S.stage = "result";
+      S.justAnalysed = true;
+    } catch (err) {
+      S.stage = "clip"; S.error = "The analysis failed on this clip. Try another clip.";
+      console.error(err);
+    }
+    render();
+    const card = document.querySelector(".reveal");
+    if (card) card.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+  }
+  else if (act === "discard") {
+    if (player) player.pause();
+    S.stage = "idle"; S.clip = null; S.result = null; S.error = ""; S.flash = ""; render();
+  }
+  else if (act === "label") { S.label = id; render(); }
+  else if (act === "save") await saveRecording();
+  else if (act === "card-current") {
+    const rec = S.recordings.find((r) => r.id === S.savedId);
+    if (rec) { S.flash = "Making the card…"; render(); S.flash = await shareCard(rec); render(); }
+  }
+  else if (act === "card") {
+    const rec = S.recordings.find((r) => r.id === id);
+    S.flash = await shareCard(rec); render();
+  }
+  else if (act === "play-rec") {
+    const r = S.recordings.find((x) => x.id === id);
+    if (r) { if (r.url) URL.revokeObjectURL(r.url); r.url = URL.createObjectURL(r.audio);
+      // stored audio is the 8 kHz copy, so positions are in its own timeline
+      playUrl(r.url, r.trimStart, r.trimEnd, r.duration, r.id); }
+  }
+  else if (act === "ask-del") { S.confirmDelete = id; render(); }
+  else if (act === "cancel-del") { S.confirmDelete = null; render(); }
+  else if (act === "del-rec") { await store.del("recordings", id); S.confirmDelete = null; await refresh(); toast("Clip deleted"); render(); }
+  else if (act === "del-cat") {
+    for (const r of S.recordings.filter((x) => x.catId === id)) await store.del("recordings", r.id);
+    await store.del("cats", id); S.confirmDelete = null; await refresh(); render();
+  }
+  else if (act === "export") {
+    const rows = [["recorded_at", "cat", "user_label", "note", "model_detection", "model_top_situation", "model_unsure", "model_version"]];
+    S.recordings.forEach((r) => rows.push([new Date(r.createdAt).toISOString(), (S.cats.find((c) => c.id === r.catId) || {}).name || "",
+      r.userLabel, r.note, r.result.detection, (r.result.contexts[0] || {}).id || "", String(r.result.context_unsure), r.modelVersion]));
+    const csv = rows.map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+    S.flash = await saveFile("meowmemo-journal.csv", csv); render();
+  }
+});
+
+document.addEventListener("keydown", (e) => {
+  if ((e.key === "Enter" || e.key === " ") && e.target.id === "add-clip-label") { e.preventDefault(); document.getElementById("clip-input").click(); }
+});
+
+document.addEventListener("change", async (e) => {
+  const t = e.target;
+  if (t.id === "clip-input" && t.files[0]) loadClip(t.files[0]);
+  else if (t.id === "filter-cat") { S.filterCat = t.value; render(); }
+  else if (t.id === "filter-label") { S.filterLabel = t.value; render(); }
+  else if (t.dataset.relabel) {
+    const r = S.recordings.find((x) => x.id === t.dataset.relabel);
+    if (r) { r.userLabel = t.value; const { url, ...rest } = r; await store.put("recordings", rest); }
+  }
+});
+
+document.addEventListener("input", (e) => {
+  const t = e.target;
+  if (t.id === "note") S.note = t.value;
+  else if ((t.id === "trim-start" || t.id === "trim-end") && S.clip) {
+    const v = Number(t.value);
+    if (t.id === "trim-start") S.trim = [Math.max(0, Math.min(v, S.trim[1] - MIN_S)), S.trim[1]];
+    else S.trim = [S.trim[0], Math.min(S.clip.duration, Math.max(v, S.trim[0] + MIN_S))];
+    updateTrimUI();
+  }
+});
+
+document.addEventListener("submit", async (e) => {
+  const form = e.target.closest("[data-form='add-cat']");
+  if (!form) return;
+  e.preventDefault();
+  const name = form.elements.name.value.trim();
+  if (!name) return;
+  let photo = null;
+  const f = form.elements.photo.files[0];
+  if (f) { try { photo = await shrinkPhoto(f); } catch { photo = null; } }
+  const cat = { id: uid(), name: name.slice(0, 30), photo, createdAt: Date.now() };
+  await store.put("cats", cat);
+  S.catId = cat.id;
+  await refresh();
+  render();
+});
+
+function syncTab() { setTab(location.hash.replace("#", "")); }
+function setTab(h) {
+  S.tab = ["journal", "cats"].includes(h) ? h : "analyse";
+  S.confirmDelete = null; S.flash = "";
+  render();
+  window.scrollTo(0, 0);
+}
+window.addEventListener("hashchange", syncTab);
+let resizeTimer;
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(drawAllWaves, 150); });
+
+/** Clips saved before on-device learning existed have no stored features: work them out once. */
+async function backfill() {
+  const todo = S.recordings.filter((r) => r.audio && r.result.detection !== "not_detected" && !Array.isArray(r.result.features));
+  for (const r of todo) {
+    try {
+      const { samples, rate } = await decodeToMono(r.audio);
+      const y = F.toModelAudio(samples, rate);
+      const clip = y.slice(Math.floor(r.trimStart * F.SR), Math.floor(r.trimEnd * F.SR));
+      const d = describeClip(clip);
+      r.result = { ...r.result, features: d.features, general: d.general };
+      const { url, ...rest } = r;
+      await store.put("recordings", rest);
+    } catch { /* leave it out of learning */ }
+  }
+  if (todo.length) render();
+}
+
+(async function start() {
+  await store.open();
+  await refresh();
+  backfill();
+  consentShown = !(await store.getConsent());
+  syncTab();
+})();
+</script>

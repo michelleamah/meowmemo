@@ -1,0 +1,82 @@
+@import "tailwindcss";
+@import "@fontsource-variable/bricolage-grotesque";
+@import "@fontsource/atkinson-hyperlegible/400.css";
+@import "@fontsource/atkinson-hyperlegible/700.css";
+
+/* MeowMemo: a field notebook for one cat's sounds.
+   Ink on cool paper, one marigold accent (the record button, the cat's eye). */
+:root {
+  --paper: #eef1f6;
+  --sheet: #ffffff;
+  --ink: #1e2a4a;
+  --ink-soft: #5b6680;
+  --rule: #d5dbe6;
+  --marigold: #f2b33d;
+  --sage: #4f8a66;
+  --rose: #c2475d;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #151b2e;
+    --sheet: #1e2640;
+    --ink: #e8ecf5;
+    --ink-soft: #a4adc4;
+    --rule: #33405f;
+    --marigold: #f5c056;
+    --sage: #7cc196;
+    --rose: #ef7d90;
+  }
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-sheet: var(--sheet);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-rule: var(--rule);
+  --color-marigold: var(--marigold);
+  --color-sage: var(--sage);
+  --color-rose: var(--rose);
+  --font-display: "Bricolage Grotesque Variable", system-ui, sans-serif;
+  --font-sans: "Atkinson Hyperlegible", system-ui, sans-serif;
+}
+
+html {
+  background: var(--paper);
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 17px;
+  line-height: 1.5;
+}
+
+:focus-visible {
+  outline: 3px solid var(--marigold);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+input[type="range"] {
+  accent-color: var(--ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+@keyframes pulse-ring {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--marigold) 60%, transparent); }
+  100% { box-shadow: 0 0 0 22px transparent; }
+}
+.recording-pulse {
+  animation: pulse-ring 1.2s ease-out infinite;
+}

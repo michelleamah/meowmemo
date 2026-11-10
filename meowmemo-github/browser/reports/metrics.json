@@ -1,0 +1,116 @@
+{
+  "model_version": "meowmemo-web-20261026-1907",
+  "features": "features.js (same code in training and in the page)",
+  "context": {
+    "model": "forest",
+    "n_clips": 440,
+    "n_cats": 21,
+    "clips_per_context": {
+      "food": 92,
+      "brushing": 127,
+      "isolation": 221
+    },
+    "macro_f1_unseen_cats": 0.4509017848799178,
+    "accuracy_unseen_cats": 0.5227272727272727,
+    "macro_f1_majority_baseline": 0.22289460413514875,
+    "macro_f1_chance_baseline": 0.3346914506592145,
+    "macro_f1_random_clip_split_LEAKY": 0.6622276201881873,
+    "per_cat_accuracy": {
+      "ANI01": 0.6,
+      "BAC01": 0.32,
+      "BLE01": 0.6458333333333334,
+      "BRA01": 0.5789473684210527,
+      "BRI01": 0.3333333333333333,
+      "CAN01": 0.18518518518518517,
+      "CLE01": 0.8,
+      "DAK01": 0.8,
+      "IND01": 0.42857142857142855,
+      "JJX01": 0.7142857142857143,
+      "LEO01": 0.2,
+      "MAG01": 0.37037037037037035,
+      "MAT01": 0.6923076923076923,
+      "MEG01": 0.6428571428571429,
+      "MIN01": 0.5714285714285714,
+      "NIG01": 0.6,
+      "NUL01": 0.7857142857142857,
+      "REG01": 0.6,
+      "SPI01": 0.5925925925925926,
+      "TIG01": 0.6,
+      "WHO01": 0.38461538461538464
+    },
+    "confusion_matrix": [
+      [
+        15,
+        55,
+        22
+      ],
+      [
+        39,
+        68,
+        20
+      ],
+      [
+        34,
+        40,
+        147
+      ]
+    ],
+    "abstain_threshold": 0.5,
+    "selective": {
+      "0.4": {
+        "coverage": 0.7977272727272727,
+        "accuracy_when_answering": 0.5527065527065527
+      },
+      "0.5": {
+        "coverage": 0.35454545454545455,
+        "accuracy_when_answering": 0.6987179487179487
+      },
+      "0.6": {
+        "coverage": 0.12954545454545455,
+        "accuracy_when_answering": 0.8070175438596491
+      },
+      "0.7": {
+        "coverage": 0.03409090909090909,
+        "accuracy_when_answering": 1.0
+      }
+    },
+    "evaluation": "leave-one-cat-out (21 folds)",
+    "model_choice": "forest: confidence separates right from wrong answers; logreg was overconfident"
+  },
+  "detector": {
+    "model": "gradient_boosting",
+    "n_positive": 480,
+    "n_negative": 1960,
+    "f1_at_likely": 0.9048128342245989,
+    "precision_at_likely": 0.9296703296703297,
+    "recall_at_likely": 0.88125,
+    "recall_catmeows_at_likely": 0.9022727272727272,
+    "recall_esc50_cats_at_likely": 0.65,
+    "esc50_cats_at_least_uncertain": 0.65,
+    "false_likely_rate": {
+      "dog": 0.0,
+      "people": 0.0475,
+      "any_non_cat": 0.0163265306122449
+    },
+    "decision_share": {
+      "likely": 0.1864754098360656,
+      "uncertain": 0.00819672131147541,
+      "not_detected": 0.805327868852459
+    },
+    "thresholds": {
+      "likely": 0.6,
+      "not_detected_below": 0.3
+    },
+    "confusion_matrix_at_likely": [
+      [
+        1928,
+        32
+      ],
+      [
+        57,
+        423
+      ]
+    ],
+    "evaluation": "5-fold grouped (cats and ESC-50 folds held out); sound events, clip = most cat-like event"
+  }
+}
